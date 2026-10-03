@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect, useMemo } from "react";
 import confetti from "canvas-confetti";
+import { User as SupabaseUser } from "@supabase/supabase-js";
 import {
   QrCode,
   Sparkles,
@@ -15,74 +16,52 @@ import {
   CheckCircle2,
   Copy,
   Radio,
-  ChevronDown,
+  LogOut,
+  User as UserIcon,
 } from "lucide-react";
 import { 
   supabase, 
-  fetchLiveCustomerCard, 
-  fetchLiveStamps, 
-  generateTotpQrPayload,
-  PRESET_CUSTOMERS,
-  CustomerPreset,
-  LiveStampItem,
-  LiveCardData
+  fetchAuthenticatedCustomerCard, 
+  fetchCustomerStamps, 
+  generateCustomerTotpQr,
+  CustomerCardData,
+  StampItem
 } from "../lib/supabase";
 
 export interface LoyaltyStampPassProps {
-  tenantName?: string;
-  tenantLocation?: string;
-  customerName?: string;
-  memberId?: string;
-  tier?: string;
-  totalStamps?: number;
-  currentStamps?: number;
-  rewardTitle?: string;
+  user: SupabaseUser;
+  onSignOut?: () => void;
 }
 
-export default function LoyaltyStampPass({
-  tenantName: defaultTenantName = "Blue Bottle Coffee",
-  tenantLocation: defaultTenantLocation = "Hayes Valley • 315 Linden St, SF",
-  customerName: defaultCustomerName = "Elena Rostova",
-  memberId: defaultMemberId = "88-849204",
-  tier: defaultTier = "Gold Brew Club",
-  totalStamps: defaultTotalStamps = 7,
-  currentStamps: defaultCurrentStamps = 6,
-  rewardTitle: defaultRewardTitle = "Free Handcrafted Coffee",
-}: LoyaltyStampPassProps) {
-  // Active Customer Selection State (Defaults to Elena Rostova: ID 88-849204)
-  const [selectedMemberId, setSelectedMemberId] = useState<string>(defaultMemberId);
-  const [isSwitcherOpen, setIsSwitcherOpen] = useState<boolean>(false);
-  const [customIdInput, setCustomIdInput] = useState<string>("");
-
+export default function LoyaltyStampPass({ user, onSignOut }: LoyaltyStampPassProps) {
   const [activeTab, setActiveTab] = useState<"pass" | "history" | "benefits">("pass");
   const [showQRModal, setShowQRModal] = useState(false);
   const [qrCountdown, setQrCountdown] = useState(30);
   const [totpToken, setTotpToken] = useState("892-410");
-  const [sessionToken, setSessionToken] = useState<string>(() => `sess_${Math.random().toString(36).substring(2, 10)}`);
   
   // Realtime Supabase State
   const [realtimeStatus, setRealtimeStatus] = useState<"connecting" | "connected" | "fallback">("connecting");
-  const [liveCard, setLiveCard] = useState<LiveCardData | null>(null);
-  const [liveStampsHistory, setLiveStampsHistory] = useState<LiveStampItem[]>([]);
-  const [currentStamps, setCurrentStamps] = useState<number>(defaultCurrentStamps);
+  const [card, setCard] = useState<CustomerCardData | null>(null);
+  const [stampsHistory, setStampsHistory] = useState<StampItem[]>([]);
+  const [currentStamps, setCurrentStamps] = useState<number>(0);
   const [copiedPayloadToast, setCopiedPayloadToast] = useState(false);
   const [realtimeBanner, setRealtimeBanner] = useState<string | null>(null);
 
-  // Derived Values from active card/member
-  const memberId = liveCard?.member_id || selectedMemberId;
-  const activeCardId = liveCard?.id || selectedMemberId;
-  const tenantName = liveCard?.tenant_name || defaultTenantName;
-  const tenantLocation = liveCard?.tenant_location || defaultTenantLocation;
-  const customerName = liveCard?.customer_name || defaultCustomerName;
-  const tier = liveCard?.tier || defaultTier;
-  const totalStamps = liveCard?.total_stamps || defaultTotalStamps;
-  const rewardTitle = liveCard?.reward_title || defaultRewardTitle;
+  // Derived Values
+  const memberId = card?.member_id || `M-${user.id.substring(0, 8).toUpperCase()}`;
+  const activeCardId = card?.id || user.id;
+  const tenantName = card?.tenant_name || "Blue Bottle Coffee";
+  const tenantLocation = card?.tenant_location || "Hayes Valley • 315 Linden St, SF";
+  const customerName = card?.customer_name || user.user_metadata?.full_name || user.email?.split("@")[0] || "Loyalty Member";
+  const tier = card?.tier || "Gold Brew Club";
+  const totalStamps = card?.total_stamps || 7;
+  const rewardTitle = card?.reward_title || "Free Handcrafted Coffee";
 
   const progressPercent = Math.min(100, Math.round((currentStamps / totalStamps) * 100));
   const stampsRemaining = Math.max(0, totalStamps - currentStamps);
   const isRewardUnlocked = currentStamps >= totalStamps;
 
-  // Web Audio Synthesized Chime (Plays purely upon genuine Merchant App Realtime events)
+  // Web Audio Synthesized Chime (Plays on genuine Merchant App events)
   const playChime = (isReward = false) => {
     try {
       const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
@@ -138,116 +117,80 @@ export default function LoyaltyStampPass({
     } catch (_) {}
   };
 
-  // 1. Fetch live customer card and stamp data from Supabase whenever selectedMemberId changes
+  // 1. Initial Load: Fetch card and stamp records for this authenticated user
   useEffect(() => {
     let isMounted = true;
 
-    async function loadSupabaseData() {
+    async function loadData() {
       setRealtimeStatus("connecting");
-      const { data: cardData } = await fetchLiveCustomerCard(selectedMemberId);
+      const { data: cardData } = await fetchAuthenticatedCustomerCard(user);
       
       if (!isMounted) return;
 
       if (cardData) {
-        setLiveCard(cardData);
+        setCard(cardData);
         setCurrentStamps(cardData.current_stamps);
-        if (cardData.session_token) {
-          setSessionToken(cardData.session_token);
+        
+        const { data: stamps } = await fetchCustomerStamps(cardData.id);
+        if (isMounted) {
+          setStampsHistory(stamps);
         }
-      }
-
-      // Fetch stamps history
-      const cardId = cardData?.id || selectedMemberId;
-      const { data: stamps } = await fetchLiveStamps(cardId);
-      if (isMounted && stamps.length > 0) {
-        setLiveStampsHistory(stamps);
-      } else if (isMounted) {
-        // Preset history for active member
-        setLiveStampsHistory([
-          { id: "1", card_id: cardId, slot_number: 6, item_name: "1x Single-Origin Pour-over", created_at: "Today, 9:42 AM", location: "Hayes Valley", cashier_name: "Sam T." },
-          { id: "2", card_id: cardId, slot_number: 5, item_name: "1x Cortado with Oat Milk", created_at: "Yesterday, 8:15 AM", location: "Hayes Valley", cashier_name: "Mia L." },
-          { id: "3", card_id: cardId, slot_number: 4, item_name: "1x Gibraltar Espresso", created_at: "Sep 27, 2:30 PM", location: "Hayes Valley", cashier_name: "Sam T." },
-          { id: "4", card_id: cardId, slot_number: 3, item_name: "1x Hayes Valley Espresso", created_at: "Sep 25, 9:05 AM", location: "Bryant Park", cashier_name: "David K." },
-          { id: "5", card_id: cardId, slot_number: 2, item_name: "1x New Orleans Iced Coffee", created_at: "Sep 22, 10:12 AM", location: "Hayes Valley", cashier_name: "Elena R." },
-        ]);
       }
     }
 
-    loadSupabaseData();
+    loadData();
 
     return () => {
       isMounted = false;
     };
-  }, [selectedMemberId]);
+  }, [user]);
 
-  // 2. SUPABASE REALTIME LISTENER: Subscribes directly to Postgres Realtime changes on 'cards' and 'stamps'
+  // 2. SUPABASE REALTIME LISTENER: Subscribes strictly to changes for this authenticated card
   useEffect(() => {
-    const channelName = `realtime-loyalty-pass-${activeCardId}-${Date.now()}`;
-    
+    if (!activeCardId) return;
+
+    const channelName = `realtime-pass-${activeCardId}-${Date.now()}`;
     const channel = supabase
       .channel(channelName)
-      // Listen for stamp creation/modification on 'stamps' table
+      // Listen for stamp inserts from the merchant
       .on(
         "postgres_changes",
-        { 
-          event: "*", 
-          schema: "public", 
-          table: "stamps" 
+        {
+          event: "*",
+          schema: "public",
+          table: "stamps",
+          filter: `card_id=eq.${activeCardId}`,
+        },
+        (payload) => {
+          handleIncomingStamp(payload.new);
+        }
+      )
+      // Also catch broadcasts on stamps with matching member_id
+      .on(
+        "postgres_changes",
+        {
+          event: "INSERT",
+          schema: "public",
+          table: "stamps",
         },
         (payload) => {
           const rec = payload.new as any;
-          if (!rec) return;
-          if (!rec.card_id || rec.card_id === activeCardId || rec.member_id === selectedMemberId || rec.card_id === selectedMemberId) {
-            handleIncomingMerchantStamp(rec);
+          if (rec && (rec.card_id === activeCardId || rec.member_id === memberId)) {
+            handleIncomingStamp(rec);
           }
         }
       )
-      // Listen for audit ledger inserts on 'stamp_transactions'
+      // Listen for balance/cycle updates on cards
       .on(
         "postgres_changes",
-        { 
-          event: "INSERT", 
-          schema: "public", 
-          table: "stamp_transactions" 
+        {
+          event: "UPDATE",
+          schema: "public",
+          table: "cards",
+          filter: `id=eq.${activeCardId}`,
         },
         (payload) => {
-          const rec = payload.new as any;
-          if (!rec) return;
-          if (!rec.card_id || rec.card_id === activeCardId || rec.card_id === selectedMemberId) {
-            handleIncomingMerchantStamp(rec);
-          }
-        }
-      )
-      // Listen for updates on 'cards' table for the active card
-      .on(
-        "postgres_changes",
-        { 
-          event: "UPDATE", 
-          schema: "public", 
-          table: "cards" 
-        },
-        (payload) => {
-          const rec = payload.new as any;
-          if (!rec) return;
-          if (!rec.id || rec.id === activeCardId || rec.member_id === selectedMemberId) {
-            handleIncomingMerchantCardUpdate(rec);
-          }
-        }
-      )
-      // Listen for updates on 'customer_cards' table
-      .on(
-        "postgres_changes",
-        { 
-          event: "UPDATE", 
-          schema: "public", 
-          table: "customer_cards" 
-        },
-        (payload) => {
-          const rec = payload.new as any;
-          if (!rec) return;
-          if (!rec.id || rec.id === activeCardId || rec.customer_id === selectedMemberId) {
-            handleIncomingMerchantCardUpdate(rec);
-          }
+          handleIncomingCardUpdate(payload.new);
         }
       )
       .subscribe((status) => {
@@ -261,28 +204,30 @@ export default function LoyaltyStampPass({
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [activeCardId, selectedMemberId, totalStamps]);
+  }, [activeCardId, memberId]);
 
   // Handle incoming live stamp strictly from Merchant App
-  const handleIncomingMerchantStamp = (newRecord: any) => {
+  const handleIncomingStamp = (newRecord: any) => {
+    if (!newRecord) return;
+
     // Check if the merchant performed a reward redemption
     if (newRecord.type === "reward_redeemed" || newRecord.action === "redeem") {
-      setLiveCard(prev => prev ? { ...prev, total_completed_cycles: (prev.total_completed_cycles || 0) + 1 } : null);
+      setCard(prev => prev ? { ...prev, total_completed_cycles: (prev.total_completed_cycles || 0) + 1 } : null);
       setCurrentStamps(0);
-      setRealtimeBanner(`🎁 Free Coffee Reward Redeemed for ${customerName}! Fresh card cycle started.`);
+      setRealtimeBanner(`🎁 Free Coffee Reward Redeemed! Fresh card cycle started.`);
       playChime(true);
       triggerConfetti(true);
       setTimeout(() => setRealtimeBanner(null), 5000);
       return;
     }
 
-    const next = typeof newRecord.slot_number === 'number' 
-      ? newRecord.slot_number 
-      : (typeof newRecord.stamps_count === 'number' ? newRecord.stamps_count : (currentStamps >= totalStamps ? 1 : currentStamps + 1));
+    const next = typeof newRecord.slot_number === "number"
+      ? newRecord.slot_number
+      : (typeof newRecord.stamps_count === "number" ? newRecord.stamps_count : (currentStamps >= totalStamps ? 1 : currentStamps + 1));
 
     applyIncomingStampCount(next);
 
-    setLiveStampsHistory((prev) => [
+    setStampsHistory((prev) => [
       {
         id: newRecord.id || `live-${Date.now()}`,
         card_id: newRecord.card_id || activeCardId,
@@ -290,18 +235,19 @@ export default function LoyaltyStampPass({
         created_at: newRecord.created_at || new Date().toISOString(),
         item_name: newRecord.item_name || "Merchant POS Awarded Stamp (+1)",
         cashier_name: newRecord.cashier_name || "Merchant App POS",
-        location: newRecord.location || "Hayes Valley"
+        location: newRecord.location || "Hayes Valley",
       },
-      ...prev
+      ...prev,
     ]);
   };
 
-  const handleIncomingMerchantCardUpdate = (cardRecord: any) => {
+  const handleIncomingCardUpdate = (cardRecord: any) => {
+    if (!cardRecord) return;
     if (typeof cardRecord.current_stamps === "number") {
       applyIncomingStampCount(cardRecord.current_stamps);
     }
     if (typeof cardRecord.total_completed_cycles === "number") {
-      setLiveCard(prev => prev ? { ...prev, total_completed_cycles: cardRecord.total_completed_cycles } : null);
+      setCard(prev => prev ? { ...prev, total_completed_cycles: cardRecord.total_completed_cycles } : null);
     }
   };
 
@@ -314,12 +260,12 @@ export default function LoyaltyStampPass({
     setRealtimeBanner(
       isReward 
         ? `🎉 7/7 Stamps for ${customerName}! Free Coffee Unlocked!` 
-        : `☕ Merchant Awarded Stamp to ${customerName}! (${nextCount}/${totalStamps} Stamps)`
+        : `☕ Merchant Awarded Stamp! (${nextCount}/${totalStamps} Stamps)`
     );
 
     setTimeout(() => {
-      setRealtimeBanner(null), 4500;
-    });
+      setRealtimeBanner(null);
+    }, 4500);
   };
 
   // 3. 30-Second TOTP Auto-Rotation (Scanned by Merchant App)
@@ -329,7 +275,6 @@ export default function LoyaltyStampPass({
         if (prev <= 1) {
           const randomToken = Math.floor(100000 + Math.random() * 900000);
           setTotpToken(`${randomToken.toString().slice(0, 3)}-${randomToken.toString().slice(3)}`);
-          setSessionToken(`sess_${Math.random().toString(36).substring(2, 10)}`);
           return 30;
         }
         return prev - 1;
@@ -338,12 +283,13 @@ export default function LoyaltyStampPass({
     return () => clearInterval(timer);
   }, []);
 
-  // 4. Generate dynamic TOTP QR code payload using member_id & session token
+  // 4. Generate dynamic TOTP QR code payload for the authenticated customer
   const qrPayload = useMemo(() => {
-    return generateTotpQrPayload(selectedMemberId, sessionToken, totpToken);
-  }, [selectedMemberId, sessionToken, totpToken]);
+    if (!card) return "";
+    return generateCustomerTotpQr(card, totpToken);
+  }, [card, totpToken]);
 
-  // Deterministic SVG QR Code Pattern based on current QR Payload
+  // Deterministic SVG QR Code Pattern
   const qrGrid = useMemo(() => {
     const size = 21;
     const grid: boolean[][] = Array.from({ length: size }, () => Array(size).fill(false));
@@ -382,27 +328,13 @@ export default function LoyaltyStampPass({
     setTimeout(() => setCopiedPayloadToast(false), 2000);
   };
 
-  const handleSelectCustomer = (member: CustomerPreset) => {
-    setSelectedMemberId(member.member_id);
-    setIsSwitcherOpen(false);
-  };
-
-  const handleCustomIdSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (customIdInput.trim()) {
-      setSelectedMemberId(customIdInput.trim());
-      setIsSwitcherOpen(false);
-      setCustomIdInput("");
-    }
-  };
-
   return (
     <div className="min-h-screen bg-[#070b13] text-white flex justify-center font-sans antialiased selection:bg-cyan-500/30 selection:text-cyan-200">
       <div className="w-full max-w-[420px] min-h-screen relative flex flex-col bg-[#090e1a] shadow-2xl overflow-hidden pb-8">
         <div className="absolute -top-32 -left-32 w-80 h-80 bg-cyan-500/15 rounded-full blur-[100px] pointer-events-none" />
         <div className="absolute top-1/3 -right-32 w-80 h-80 bg-amber-500/10 rounded-full blur-[100px] pointer-events-none" />
 
-        {/* Realtime Stamp Notification Toast (Triggered strictly from Merchant App) */}
+        {/* Realtime Notification Toast */}
         {realtimeBanner && (
           <div className="absolute top-4 left-4 right-4 z-50 animate-in slide-in-from-top duration-300">
             <div className="px-4 py-3 rounded-2xl bg-cyan-950/95 border border-cyan-400/40 text-cyan-200 text-xs font-semibold shadow-2xl backdrop-blur-xl flex items-center justify-between gap-2 ring-1 ring-cyan-400/30">
@@ -420,117 +352,48 @@ export default function LoyaltyStampPass({
           </div>
         )}
 
-        {/* TOP CUSTOMER SWITCHER BAR (Dropdown to view Elena Rostova or other members) */}
+        {/* Top Authenticated Account Bar */}
         <div className="px-5 pt-3 pb-1 z-30 relative">
-          <div className="flex items-center justify-between p-1.5 px-3 rounded-2xl bg-white/[0.04] border border-white/10 backdrop-blur-md shadow-sm">
-            <button
-              onClick={() => setIsSwitcherOpen(!isSwitcherOpen)}
-              className="flex items-center gap-2 text-left cursor-pointer flex-1 group"
-              title="Click to switch member pass"
-            >
+          <div className="flex items-center justify-between p-1.5 px-3 rounded-2xl bg-white/[0.04] border border-white/10 backdrop-blur-md shadow-xs">
+            <div className="flex items-center gap-2">
               <div className="w-7 h-7 rounded-xl bg-gradient-to-tr from-cyan-500 to-sky-400 flex items-center justify-center font-bold text-[11px] text-black shadow-xs">
-                {customerName.split(" ").map(n => n[0]).join("")}
+                {customerName.substring(0, 2).toUpperCase()}
               </div>
               <div className="flex flex-col">
-                <div className="flex items-center gap-1.5">
-                  <span className="text-xs font-bold text-white group-hover:text-cyan-300 transition-colors">
-                    {customerName}
-                  </span>
-                  <ChevronDown className={`w-3.5 h-3.5 text-white/50 transition-transform ${isSwitcherOpen ? 'rotate-180' : ''}`} />
-                </div>
-                <div className="flex items-center gap-1.5 text-[10px] text-white/50 font-mono">
-                  <span>ID: {memberId}</span>
-                  {selectedMemberId === "88-849204" && (
-                    <span className="text-amber-400 font-bold bg-amber-400/10 px-1 rounded-sm text-[9px]">
-                      Merchant Target
-                    </span>
-                  )}
-                </div>
+                <span className="text-xs font-bold text-white">
+                  {customerName}
+                </span>
+                <span className="text-[10px] text-white/50 font-mono">
+                  {memberId} • {user.email}
+                </span>
               </div>
-            </button>
+            </div>
 
-            {/* Realtime Live Status Pulse */}
-            <div className="flex items-center gap-1.5 pl-2 border-l border-white/10">
-              <span 
-                className={`w-2 h-2 rounded-full ${
-                  realtimeStatus === "connected"
-                    ? "bg-emerald-400 shadow-[0_0_8px_#34d399] animate-pulse" 
-                    : "bg-amber-400 animate-pulse"
-                }`}
-              />
-              <span className="font-mono text-[9px] text-white/50 uppercase tracking-wider hidden sm:inline">
-                Realtime
-              </span>
+            <div className="flex items-center gap-2 pl-2 border-l border-white/10">
+              <div className="flex items-center gap-1">
+                <span 
+                  className={`w-2 h-2 rounded-full ${
+                    realtimeStatus === "connected"
+                      ? "bg-emerald-400 shadow-[0_0_8px_#34d399] animate-pulse" 
+                      : "bg-amber-400 animate-pulse"
+                  }`}
+                />
+                <span className="font-mono text-[9px] text-white/50 uppercase tracking-wider hidden sm:inline">
+                  Live
+                </span>
+              </div>
+
+              {onSignOut && (
+                <button
+                  onClick={onSignOut}
+                  className="p-1 rounded-lg text-white/40 hover:text-red-300 hover:bg-white/10 transition-colors cursor-pointer"
+                  title="Sign out of pass"
+                >
+                  <LogOut className="w-3.5 h-3.5" />
+                </button>
+              )}
             </div>
           </div>
-
-          {/* Customer Switcher Dropdown Modal */}
-          {isSwitcherOpen && (
-            <div 
-              className="absolute left-5 right-5 top-12 z-50 bg-[#0d1527] border border-white/20 rounded-2xl shadow-2xl p-2.5 space-y-1.5 backdrop-blur-2xl animate-in fade-in slide-in-from-top-2 duration-150"
-            >
-              <div className="text-[10px] font-bold uppercase tracking-wider text-white/40 px-2 py-1 flex items-center justify-between">
-                <span>Select Scanned Member</span>
-                <span className="text-cyan-400 font-mono">Supabase Realtime</span>
-              </div>
-
-              {PRESET_CUSTOMERS.map((preset) => {
-                const isSelected = preset.member_id === selectedMemberId;
-                return (
-                  <button
-                    key={preset.member_id}
-                    onClick={() => handleSelectCustomer(preset)}
-                    className={`w-full p-2 rounded-xl flex items-center justify-between text-left transition-all cursor-pointer ${
-                      isSelected 
-                        ? 'bg-cyan-500/20 border border-cyan-400/40 text-cyan-200' 
-                        : 'hover:bg-white/[0.05] text-white/80'
-                    }`}
-                  >
-                    <div className="flex items-center gap-2.5">
-                      <div className={`w-7 h-7 rounded-lg flex items-center justify-center text-xs font-bold ${
-                        isSelected ? 'bg-cyan-400 text-black' : 'bg-white/10 text-white/70'
-                      }`}>
-                        {preset.customer_name.split(" ").map(n => n[0]).join("")}
-                      </div>
-                      <div>
-                        <div className="text-xs font-bold flex items-center gap-1.5">
-                          <span>{preset.customer_name}</span>
-                          {preset.member_id === "88-849204" && (
-                            <span className="text-[9px] bg-amber-500/20 text-amber-300 border border-amber-400/30 px-1 py-0.2 rounded-full font-mono">
-                              POS Target
-                            </span>
-                          )}
-                        </div>
-                        <div className="text-[10px] text-white/40 font-mono">
-                          ID: {preset.member_id} • {preset.current_stamps}/7 Stamps
-                        </div>
-                      </div>
-                    </div>
-                    {isSelected && (
-                      <Check className="w-4 h-4 text-cyan-400 stroke-[3]" />
-                    )}
-                  </button>
-                );
-              })}
-
-              {/* Custom Member ID Input */}
-              <form onSubmit={handleCustomIdSubmit} className="pt-1 border-t border-white/10 flex items-center gap-1.5">
-                <input
-                  type="text"
-                  value={customIdInput}
-                  onChange={(e) => setCustomIdInput(e.target.value)}
-                  placeholder="Custom Member ID (e.g. 88-849204)..."
-                  className="flex-1 bg-black/40 border border-white/10 rounded-xl px-2.5 py-1.5 text-xs text-white placeholder-white/30 focus:outline-none focus:border-cyan-400/60 font-mono"
-                />
-                <button
-                  type="submit"
-                  className="px-2.5 py-1.5 bg-cyan-500 hover:bg-cyan-400 text-black font-bold text-xs rounded-xl transition-colors cursor-pointer"
-                >
-                  Load
-                </button>
-              </form>
-            </div>
-          )}
         </div>
 
         {/* Merchant Branding Header */}
@@ -538,7 +401,7 @@ export default function LoyaltyStampPass({
           <div className="flex items-center gap-3">
             <div className="relative">
               <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-cyan-400 to-sky-600 flex items-center justify-center p-2.5 shadow-lg shadow-cyan-500/20 border border-cyan-300/30">
-                <div className="w-4 h-8 bg-white rounded-t-sm rounded-b-md relative flex justify-center shadow-sm">
+                <div className="w-4 h-8 bg-white rounded-t-sm rounded-b-md relative flex justify-center shadow-xs">
                   <div className="w-2 h-1.5 bg-white -top-1 absolute rounded-xs" />
                 </div>
               </div>
@@ -554,7 +417,7 @@ export default function LoyaltyStampPass({
               <p className="text-xs text-white/50 truncate max-w-[190px]">{tenantLocation}</p>
             </div>
           </div>
-          <div className="px-2.5 py-1 rounded-full bg-gradient-to-r from-amber-500/20 to-yellow-600/10 border border-amber-400/40 text-amber-300 flex items-center gap-1 shadow-sm">
+          <div className="px-2.5 py-1 rounded-full bg-gradient-to-r from-amber-500/20 to-yellow-600/10 border border-amber-400/40 text-amber-300 flex items-center gap-1 shadow-xs">
             <Sparkles className="w-3 h-3 text-amber-400" />
             <span className="text-[11px] font-bold tracking-wider uppercase">{tier}</span>
           </div>
@@ -592,7 +455,7 @@ export default function LoyaltyStampPass({
                 <div className="flex items-start justify-between pb-3 border-b border-white/10">
                   <div>
                     <span className="text-[10px] font-bold uppercase tracking-widest text-white/40 block">
-                      Member Stamp Pass
+                      Authenticated Pass
                     </span>
                     <h2 className="text-xl font-bold text-white tracking-tight mt-0.5">{customerName}</h2>
                     <div className="flex items-center gap-2 mt-1">
@@ -606,7 +469,7 @@ export default function LoyaltyStampPass({
                   <button
                     onClick={() => setShowQRModal(true)}
                     className="w-11 h-11 rounded-2xl bg-white/10 hover:bg-white/20 active:scale-95 transition-all border border-white/15 flex flex-col items-center justify-center gap-0.5 group shadow-md cursor-pointer"
-                    title={`Open Live TOTP QR Pass for ${customerName}`}
+                    title="Open Live TOTP QR Pass"
                   >
                     <QrCode className="w-5 h-5 text-cyan-400 group-hover:scale-110 transition-transform" />
                     <span className="text-[9px] font-bold tracking-tight text-white/70">QR</span>
@@ -641,7 +504,7 @@ export default function LoyaltyStampPass({
                   </div>
                 </div>
 
-                {/* 3x3 Stamp Grid (STRICTLY READ-ONLY: Updates only via Merchant App in Supabase) */}
+                {/* 3x3 Stamp Grid (STRICTLY READ-ONLY: Updates solely via Merchant App) */}
                 <div className="mt-4 grid grid-cols-3 gap-3 select-none">
                   {[1, 2, 3, 4, 5, 6].map((num) => {
                     const isStamped = num <= currentStamps;
@@ -730,7 +593,7 @@ export default function LoyaltyStampPass({
                     {rewardTitle}
                   </span>
                   <span className="text-white/40 font-mono">
-                    {liveCard?.total_completed_cycles ?? 2} Claimed
+                    {card?.total_completed_cycles ?? 0} Claimed
                   </span>
                 </div>
               </div>
@@ -742,7 +605,7 @@ export default function LoyaltyStampPass({
                     <Coffee className="w-5 h-5 text-amber-400" />
                   </div>
                   <div>
-                    <h4 className="text-xs font-bold text-white">{tier} Perk Active</h4>
+                    <h4 className="text-xs font-bold text-white">{tier} Active</h4>
                     <p className="text-[11px] text-white/50">Free oat/almond milk & signature vanilla bean syrup</p>
                   </div>
                 </div>
@@ -752,14 +615,14 @@ export default function LoyaltyStampPass({
               {/* Mobile Wallet Integrations */}
               <div className="grid grid-cols-2 gap-2.5 pt-1">
                 <button 
-                  onClick={() => alert(`${customerName}'s Pass (${memberId}) added to Apple Wallet`)}
+                  onClick={() => alert(`Your Pass (${memberId}) has been prepared for Apple Wallet.`)}
                   className="py-2.5 px-3 rounded-2xl bg-black border border-white/20 hover:border-white/40 flex items-center justify-center gap-2 transition-all shadow-md cursor-pointer"
                 >
                   <span className="text-sm font-serif font-black text-white"></span>
                   <span className="text-xs font-semibold text-white">Apple Wallet</span>
                 </button>
                 <button 
-                  onClick={() => alert(`${customerName}'s Pass (${memberId}) saved to Google Wallet`)}
+                  onClick={() => alert(`Your Pass (${memberId}) has been prepared for Google Wallet.`)}
                   className="py-2.5 px-3 rounded-2xl bg-white/[0.05] border border-white/15 hover:border-white/30 flex items-center justify-center gap-2 transition-all shadow-md cursor-pointer"
                 >
                   <span className="text-xs font-bold bg-gradient-to-r from-blue-400 via-red-400 to-yellow-400 bg-clip-text text-transparent">
@@ -774,26 +637,33 @@ export default function LoyaltyStampPass({
           {activeTab === "history" && (
             <div className="space-y-2.5 text-xs">
               <div className="text-white/40 font-mono text-[11px] px-1 flex items-center justify-between">
-                <span>History for {customerName}</span>
-                <span className="text-cyan-400 font-semibold">{liveStampsHistory.length} records</span>
+                <span>Visit Ledger</span>
+                <span className="text-cyan-400 font-semibold">{stampsHistory.length} recorded</span>
               </div>
-              {liveStampsHistory.map((h: any, idx) => (
-                <div key={h.id || idx} className="p-3 rounded-2xl bg-white/[0.04] border border-white/10 flex items-center justify-between">
-                  <div className="flex items-center gap-3">
-                    <div className="w-8 h-8 rounded-xl bg-cyan-500/20 text-cyan-300 font-mono font-bold flex items-center justify-center text-xs">
-                      #{h.slot_number}
-                    </div>
-                    <div>
-                      <div className="font-semibold text-white">{h.item_name}</div>
-                      <div className="text-[11px] text-white/50">{h.location} • {new Date(h.created_at).toLocaleDateString() === 'Invalid Date' ? h.created_at : new Date(h.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</div>
-                    </div>
-                  </div>
-                  <span className="text-[10px] text-emerald-400 font-mono font-semibold flex items-center gap-1">
-                    <Check className="w-3 h-3 stroke-[3]" />
-                    Verified
-                  </span>
+              {stampsHistory.length === 0 ? (
+                <div className="p-8 text-center bg-white/[0.02] border border-white/5 rounded-2xl text-white/40">
+                  <Coffee className="w-8 h-8 mx-auto mb-2 opacity-30" />
+                  <p>No stamps earned yet. Visit the café to earn your first stamp!</p>
                 </div>
-              ))}
+              ) : (
+                stampsHistory.map((h: any, idx) => (
+                  <div key={h.id || idx} className="p-3 rounded-2xl bg-white/[0.04] border border-white/10 flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      <div className="w-8 h-8 rounded-xl bg-cyan-500/20 text-cyan-300 font-mono font-bold flex items-center justify-center text-xs">
+                        #{h.slot_number}
+                      </div>
+                      <div>
+                        <div className="font-semibold text-white">{h.item_name}</div>
+                        <div className="text-[11px] text-white/50">{h.location} • {new Date(h.created_at).toLocaleDateString() === 'Invalid Date' ? h.created_at : new Date(h.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</div>
+                      </div>
+                    </div>
+                    <span className="text-[10px] text-emerald-400 font-mono font-semibold flex items-center gap-1">
+                      <Check className="w-3 h-3 stroke-[3]" />
+                      Verified
+                    </span>
+                  </div>
+                ))
+              )}
             </div>
           )}
 
@@ -841,7 +711,7 @@ export default function LoyaltyStampPass({
           >
             <span className="w-2.5 h-2.5 rounded-full bg-black animate-ping" />
             <span>
-              {isRewardUnlocked ? "Reward Ready • Show Pass to Redeem" : `Show Member Pass (${customerName.split(" ")[0]})`}
+              {isRewardUnlocked ? "Reward Ready • Show Pass to Redeem" : "Show Member Pass QR"}
             </span>
           </button>
         </div>

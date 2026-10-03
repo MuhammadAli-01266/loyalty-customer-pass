@@ -1,94 +1,111 @@
-/**
- * Unified Environment Variable Management & Fallback Resolver
- * Supports both Vite (VITE_) and Next.js (NEXT_PUBLIC_) conventions.
- * Includes sanitization against Markdown wrapping, trailing slashes, and quotes.
- */
-
-// Default Fallback Supabase Credentials
-const DEFAULT_SUPABASE_URL = 'https://uovotzsbepqufgcxewkt.supabase.co';
-const DEFAULT_SUPABASE_ANON_KEY = 'sb_publishable_h1MmJxWUkjndrmHiPr4ogQ_ba94P';
-
-/**
- * Safely extracts a clean HTTP/HTTPS URL from any raw environment variable string,
- * automatically stripping Markdown links like `[https://...](https://...)`, outer quotes, or spaces.
- */
-export function sanitizeUrl(rawUrl: string | undefined | null): string {
-  if (!rawUrl || typeof rawUrl !== 'string') {
-    return DEFAULT_SUPABASE_URL;
+// Build-time configuration. The ONLY accepted variables are:
+//   VITE_SUPABASE_URL              https://<project-ref>.supabase.co
+//   VITE_SUPABASE_PUBLISHABLE_KEY  sb_publishable_...  (or the legacy "anon public" JWT)
+//   VITE_CUSTOMER_APP_URL          optional, merchant terminal only
+// There are no hard-coded fallbacks: a misconfigured build shows a clear error screen
+// instead of failing later with "Invalid API key" or 404s.
+function cleanEnv(val: string | undefined): string {
+  if (!val) return "";
+  let s = val.trim();
+  if ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'")) || (s.startsWith("`") && s.endsWith("`"))) {
+    s = s.slice(1, -1).trim();
   }
-
-  // Handle Markdown-style links [url](url)
-  const match = rawUrl.match(/https?:\/\/[^\s)"'\]]+/i);
-  if (match && match[0]) {
-    // Strip trailing slash for consistency
-    return match[0].trim().replace(/\/+$/, '');
+  const md = /\[[^\]]*\]\(([^)]+)\)/.exec(s);
+  if (md) {
+    s = md[1]!.trim();
   }
-
-  const cleaned = rawUrl.trim().replace(/^["'`]|["'`]$/g, '').replace(/\/+$/, '');
-  if (/^https?:\/\//i.test(cleaned)) {
-    return cleaned;
+  if ((s.startsWith("<") && s.endsWith(">")) || (s.startsWith("[") && s.endsWith("]"))) {
+    s = s.slice(1, -1).trim();
   }
-
-  return DEFAULT_SUPABASE_URL;
+  return s;
 }
 
-/**
- * Cleans an API / Anon key by stripping outer quotes, brackets, and whitespace.
- */
-export function sanitizeKey(rawKey: string | undefined | null): string {
-  if (!rawKey || typeof rawKey !== 'string') {
-    return DEFAULT_SUPABASE_ANON_KEY;
-  }
+const rawUrl = cleanEnv(import.meta.env.VITE_SUPABASE_URL);
+const rawKey = cleanEnv(import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY);
+const rawCustomerUrl = cleanEnv(import.meta.env.VITE_CUSTOMER_APP_URL).replace(/\/+$/, "");
 
-  const cleaned = rawKey.trim().replace(/^["'`]|["'`]$/g, '');
-  return cleaned || DEFAULT_SUPABASE_ANON_KEY;
-}
-
-/**
- * Reads an environment variable checking both VITE_ and NEXT_PUBLIC_ prefixes,
- * inspecting both Vite's `import.meta.env` and Node/SSR `process.env`.
- */
-export function getEnvVar(keyBase: string): string | undefined {
-  const viteKey = `VITE_${keyBase}`;
-  const nextKey = `NEXT_PUBLIC_${keyBase}`;
-
-  // 1. Check import.meta.env (Vite client build)
+function isHttpUrl(value: string): boolean {
   try {
-    if (typeof import.meta !== 'undefined' && import.meta.env) {
-      if (import.meta.env[viteKey]) return import.meta.env[viteKey];
-      if (import.meta.env[nextKey]) return import.meta.env[nextKey];
-      if (import.meta.env[keyBase]) return import.meta.env[keyBase];
-    }
-  } catch (_) {
-    // Ignore ReferenceErrors if import.meta is unavailable
+    const u = new URL(value);
+    return u.protocol === "https:" || (u.protocol === "http:" && /^(localhost|127\.0\.0\.1)$/.test(u.hostname));
+  } catch {
+    return false;
   }
-
-  // 2. Check process.env (Vercel / Node / SSR build)
-  try {
-    if (typeof process !== 'undefined' && process.env) {
-      if (process.env[viteKey]) return process.env[viteKey];
-      if (process.env[nextKey]) return process.env[nextKey];
-      if (process.env[keyBase]) return process.env[keyBase];
-    }
-  } catch (_) {
-    // Ignore ReferenceErrors
-  }
-
-  return undefined;
 }
 
-// Resolved & Sanitized Environment Values
-export const SUPABASE_URL = sanitizeUrl(
-  getEnvVar('SUPABASE_URL') || DEFAULT_SUPABASE_URL
-);
+/** Project ref from https://<ref>.supabase.co (null for custom domains / local). */
+function refFromUrl(url: string): string | null {
+  try {
+    const m = /^([a-z0-9]{20})\.supabase\.co$/.exec(new URL(url).hostname);
+    return m ? m[1]! : null;
+  } catch {
+    return null;
+  }
+}
 
-export const SUPABASE_ANON_KEY = sanitizeKey(
-  getEnvVar('SUPABASE_ANON_KEY') || DEFAULT_SUPABASE_ANON_KEY
-);
+function decodeJwtPayload(key: string): Record<string, unknown> | null {
+  const parts = key.split(".");
+  if (parts.length !== 3) return null;
+  try {
+    return JSON.parse(atob(parts[1]!.replace(/-/g, "+").replace(/_/g, "/")));
+  } catch {
+    return null;
+  }
+}
 
-// Auth Token Storage Key (Synced with multi-tenant architecture)
-export const AUTH_STORAGE_KEY = 'loyalty_customer_pass_session_v1';
+/** Copy-paste damage we refuse instead of "repairing" silently. */
+function pasteProblem(value: string): string | null {
+  if (/[\[\]()<>]/.test(value)) return "contains Markdown/link formatting such as [ ] ( ). Paste the plain value only";
+  if (/["'`]/.test(value)) return "contains quote characters. Remove them";
+  if (/\s/.test(value)) return "contains spaces or line breaks. Paste it on a single line";
+  return null;
+}
 
-export const IS_PRODUCTION = 
-  (typeof import.meta !== 'undefined' && import.meta.env?.PROD) ||
-  (typeof process !== 'undefined' && process.env?.NODE_ENV === 'production');
+export const configErrors: string[] = [];
+
+if (!rawUrl) {
+  configErrors.push("VITE_SUPABASE_URL is not set.");
+} else if (pasteProblem(rawUrl)) {
+  configErrors.push(`VITE_SUPABASE_URL ${pasteProblem(rawUrl)}.`);
+} else if (!isHttpUrl(rawUrl)) {
+  configErrors.push("VITE_SUPABASE_URL must be https://<project-ref>.supabase.co.");
+} else {
+  const u = new URL(rawUrl);
+  if (u.pathname !== "/" || u.search || u.hash) {
+    configErrors.push(`VITE_SUPABASE_URL must be only https://${u.host} (no path, no trailing slash).`);
+  }
+  if (/supabase\.com$/.test(u.hostname)) {
+    configErrors.push("VITE_SUPABASE_URL is the dashboard URL. Use the API URL https://<project-ref>.supabase.co.");
+  }
+}
+
+if (!rawKey) {
+  configErrors.push("VITE_SUPABASE_PUBLISHABLE_KEY is not set.");
+} else if (pasteProblem(rawKey)) {
+  configErrors.push(`VITE_SUPABASE_PUBLISHABLE_KEY ${pasteProblem(rawKey)}.`);
+} else if (/^sb_secret_/.test(rawKey) || decodeJwtPayload(rawKey)?.role === "service_role") {
+  configErrors.push("VITE_SUPABASE_PUBLISHABLE_KEY is a SECRET key. Use the publishable key, and rotate the secret now.");
+} else if (!/^sb_publishable_[A-Za-z0-9_-]{10,}$/.test(rawKey) && !decodeJwtPayload(rawKey)) {
+  configErrors.push("VITE_SUPABASE_PUBLISHABLE_KEY doesn't look like a Supabase key (expected sb_publishable_…).");
+} else {
+  const urlRef = refFromUrl(rawUrl);
+  const keyRef = decodeJwtPayload(rawKey)?.ref;
+  if (urlRef && typeof keyRef === "string" && keyRef !== urlRef) {
+    configErrors.push(`The key belongs to project "${keyRef}" but VITE_SUPABASE_URL points to "${urlRef}".`);
+  }
+}
+
+export const env = {
+  supabaseUrl: rawUrl.replace(/\/+$/, ""),
+  supabaseKey: rawKey,
+  projectRef: refFromUrl(rawUrl),
+  keyKind: rawKey.startsWith("sb_publishable_") ? "publishable" : decodeJwtPayload(rawKey) ? "legacy anon" : "unknown",
+  customerAppUrl: isHttpUrl(rawCustomerUrl) ? rawCustomerUrl : "",
+  supabaseHost: (() => {
+    try {
+      return new URL(rawUrl).host;
+    } catch {
+      return "";
+    }
+  })(),
+};

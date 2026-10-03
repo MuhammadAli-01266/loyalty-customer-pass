@@ -7,7 +7,6 @@ import {
   sanitizeKey 
 } from './env';
 
-// Re-export sanitized env variables and utility functions for client synchronization
 export { SUPABASE_URL, SUPABASE_ANON_KEY, AUTH_STORAGE_KEY };
 export const sanitizeSupabaseUrl = sanitizeUrl;
 export const sanitizeSupabaseKey = sanitizeKey;
@@ -49,27 +48,55 @@ try {
 
 export const supabase = supabaseClient;
 
-/**
- * Check active customer authentication session without throwing authorization errors
- */
-export async function getAuthSession(): Promise<Session | null> {
+// --- Authentication APIs ---
+
+export async function signInWithEmail(email: string, password: string): Promise<{ data: any; error: any }> {
+  return await supabase.auth.signInWithPassword({
+    email: email.trim(),
+    password,
+  });
+}
+
+export async function signUpWithEmail(
+  email: string, 
+  password: string, 
+  displayName?: string
+): Promise<{ data: any; error: any }> {
+  return await supabase.auth.signUp({
+    email: email.trim(),
+    password,
+    options: {
+      data: {
+        full_name: displayName?.trim() || email.split('@')[0],
+      },
+    },
+  });
+}
+
+export async function signInWithOtp(email: string): Promise<{ data: any; error: any }> {
+  return await supabase.auth.signInWithOtp({
+    email: email.trim(),
+    options: {
+      emailRedirectTo: typeof window !== 'undefined' ? window.location.origin : undefined,
+    },
+  });
+}
+
+export async function signOut(): Promise<{ error: any }> {
+  return await supabase.auth.signOut();
+}
+
+export async function getSession(): Promise<Session | null> {
   try {
     const { data, error } = await supabase.auth.getSession();
-    if (error) {
-      console.warn('[Supabase Auth] Session fetch notice:', error.message);
-      return null;
-    }
+    if (error) return null;
     return data.session;
-  } catch (err) {
-    console.warn('[Supabase Auth] Session check caught exception:', err);
+  } catch (_) {
     return null;
   }
 }
 
-/**
- * Get active authenticated user or null
- */
-export async function getAuthUser(): Promise<User | null> {
+export async function getCurrentUser(): Promise<User | null> {
   try {
     const { data: { user }, error } = await supabase.auth.getUser();
     if (error) return null;
@@ -79,66 +106,13 @@ export async function getAuthUser(): Promise<User | null> {
   }
 }
 
-export interface CustomerPreset {
-  member_id: string;
-  customer_name: string;
-  tier: string;
-  current_stamps: number;
-  total_stamps: number;
-  reward_title: string;
-  tenant_name: string;
-  tenant_location: string;
-  subtitle?: string;
-}
+// --- Customer Loyalty Card & Stamp Models ---
 
-export const PRESET_CUSTOMERS: CustomerPreset[] = [
-  {
-    member_id: "88-849204",
-    customer_name: "Elena Rostova",
-    tier: "Gold Brew Club",
-    current_stamps: 6,
-    total_stamps: 7,
-    reward_title: "Free Handcrafted Coffee",
-    tenant_name: "Blue Bottle Coffee",
-    tenant_location: "Hayes Valley • 315 Linden St, SF",
-    subtitle: "Active Merchant POS Scan Target"
-  },
-  {
-    member_id: "BB-849204",
-    customer_name: "Alex Morgan",
-    tier: "Gold Brew Club",
-    current_stamps: 4,
-    total_stamps: 7,
-    reward_title: "Free Handcrafted Coffee",
-    tenant_name: "Blue Bottle Coffee",
-    tenant_location: "Hayes Valley • 315 Linden St, SF"
-  },
-  {
-    member_id: "BB-519208",
-    customer_name: "Marcus Vance",
-    tier: "Silver Roast Club",
-    current_stamps: 2,
-    total_stamps: 7,
-    reward_title: "Free Artisan Pour-over",
-    tenant_name: "Blue Bottle Coffee",
-    tenant_location: "Hayes Valley • 315 Linden St, SF"
-  },
-  {
-    member_id: "BB-920145",
-    customer_name: "Sarah Chen",
-    tier: "Platinum Connoisseur",
-    current_stamps: 7,
-    total_stamps: 7,
-    reward_title: "Free Specialty Beverage",
-    tenant_name: "Blue Bottle Coffee",
-    tenant_location: "Hayes Valley • 315 Linden St, SF"
-  }
-];
-
-export interface LiveCardData {
+export interface CustomerCardData {
   id: string;
   member_id: string;
   customer_name: string;
+  customer_email: string;
   tenant_name: string;
   tenant_location: string;
   current_stamps: number;
@@ -150,7 +124,7 @@ export interface LiveCardData {
   session_token?: string;
 }
 
-export interface LiveStampItem {
+export interface StampItem {
   id: string;
   card_id: string;
   slot_number: number;
@@ -161,32 +135,24 @@ export interface LiveStampItem {
 }
 
 /**
- * Fetch live customer card data from Supabase for a specific member_id.
- * Checks both 'cards' table and 'customer_cards' table, and gracefully falls back to preset member data
- * if unauthenticated or during initial onboard without triggering authorization crashes.
+ * Fetch the authenticated customer's card record from Supabase.
+ * Strictly queries for rows belonging to user.id or user.email.
+ * If no record exists yet, provisions an active loyalty pass for this customer.
  */
-export async function fetchLiveCustomerCard(memberId: string): Promise<{
-  data: LiveCardData | null;
+export async function fetchAuthenticatedCustomerCard(user: User): Promise<{
+  data: CustomerCardData | null;
   error: any;
 }> {
-  // Find matching preset or default to Elena Rostova
-  const preset = PRESET_CUSTOMERS.find(p => p.member_id === memberId) || {
-    member_id: memberId,
-    customer_name: memberId === '88-849204' ? 'Elena Rostova' : 'Alex Morgan',
-    tier: 'Gold Brew Club',
-    current_stamps: 6,
-    total_stamps: 7,
-    reward_title: 'Free Handcrafted Coffee',
-    tenant_name: 'Blue Bottle Coffee',
-    tenant_location: 'Hayes Valley • 315 Linden St, SF'
-  };
+  const userEmail = user.email || 'customer@loyalty.app';
+  const userName = user.user_metadata?.full_name || userEmail.split('@')[0] || 'Loyalty Member';
+  const memberCode = `M-${user.id.substring(0, 8).toUpperCase()}`;
 
   try {
-    // 1. Try 'cards' table first
+    // 1. Check 'cards' table for this user
     const { data: card, error: cardError } = await supabase
       .from('cards')
       .select('*')
-      .or(`member_id.eq.${memberId},id.eq.${memberId},member_id.ilike.%${memberId}%`)
+      .or(`user_id.eq.${user.id},member_id.eq.${memberCode},customer_email.eq.${userEmail}`)
       .limit(1)
       .maybeSingle();
 
@@ -194,15 +160,16 @@ export async function fetchLiveCustomerCard(memberId: string): Promise<{
       return {
         data: {
           id: card.id,
-          member_id: card.member_id || memberId,
-          customer_name: card.customer_name || card.name || preset.customer_name,
-          tenant_name: card.tenant_name || card.shop_title || preset.tenant_name,
-          tenant_location: card.tenant_location || card.location || preset.tenant_location,
-          current_stamps: typeof card.current_stamps === 'number' ? card.current_stamps : (card.stamps_count || preset.current_stamps),
-          total_stamps: card.total_stamps || preset.total_stamps,
-          total_completed_cycles: card.total_completed_cycles || 2,
-          tier: card.tier || preset.tier,
-          reward_title: card.reward_title || preset.reward_title,
+          member_id: card.member_id || memberCode,
+          customer_name: card.customer_name || card.name || userName,
+          customer_email: card.customer_email || userEmail,
+          tenant_name: card.tenant_name || card.shop_title || 'Blue Bottle Coffee',
+          tenant_location: card.tenant_location || card.location || 'Hayes Valley • 315 Linden St, SF',
+          current_stamps: typeof card.current_stamps === 'number' ? card.current_stamps : 0,
+          total_stamps: card.total_stamps || 7,
+          total_completed_cycles: card.total_completed_cycles || 0,
+          tier: card.tier || 'Gold Brew Club',
+          reward_title: card.reward_title || 'Free Handcrafted Coffee',
           last_stamped_at: card.last_stamped_at || card.updated_at,
           session_token: card.session_token || `sess_${Math.random().toString(36).substring(2, 10)}`
         },
@@ -210,10 +177,11 @@ export async function fetchLiveCustomerCard(memberId: string): Promise<{
       };
     }
 
-    // 2. Fallback: Try 'customer_cards' table with joins
+    // 2. Check 'customer_cards' table
     const { data: customerCard, error: ccError } = await supabase
       .from('customer_cards')
       .select('*, customers(*), loyalty_programs(*), tenants(*)')
+      .or(`customer_id.eq.${user.id},id.eq.${user.id}`)
       .limit(1)
       .maybeSingle();
 
@@ -221,15 +189,16 @@ export async function fetchLiveCustomerCard(memberId: string): Promise<{
       return {
         data: {
           id: customerCard.id,
-          member_id: memberId,
-          customer_name: customerCard.customers?.name || preset.customer_name,
-          tenant_name: customerCard.tenants?.name || preset.tenant_name,
-          tenant_location: preset.tenant_location,
-          current_stamps: customerCard.current_stamps ?? preset.current_stamps,
-          total_stamps: customerCard.loyalty_programs?.required_stamps || preset.total_stamps,
-          total_completed_cycles: customerCard.total_completed_cycles || 2,
-          tier: preset.tier,
-          reward_title: customerCard.loyalty_programs?.reward_description || preset.reward_title,
+          member_id: memberCode,
+          customer_name: customerCard.customers?.name || userName,
+          customer_email: userEmail,
+          tenant_name: customerCard.tenants?.name || 'Blue Bottle Coffee',
+          tenant_location: 'Hayes Valley • 315 Linden St, SF',
+          current_stamps: customerCard.current_stamps ?? 0,
+          total_stamps: customerCard.loyalty_programs?.required_stamps || 7,
+          total_completed_cycles: customerCard.total_completed_cycles || 0,
+          tier: 'Gold Brew Club',
+          reward_title: customerCard.loyalty_programs?.reward_description || 'Free Handcrafted Coffee',
           last_stamped_at: customerCard.last_stamped_at,
           session_token: `sess_${Math.random().toString(36).substring(2, 10)}`
         },
@@ -237,19 +206,20 @@ export async function fetchLiveCustomerCard(memberId: string): Promise<{
       };
     }
 
-    // Return preset member data when offline or pending server records
+    // 3. Fallback: Initialize an active card for this authenticated user
     return {
       data: {
-        id: `card-${memberId}`,
-        member_id: preset.member_id,
-        customer_name: preset.customer_name,
-        tenant_name: preset.tenant_name,
-        tenant_location: preset.tenant_location,
-        current_stamps: preset.current_stamps,
-        total_stamps: preset.total_stamps,
-        total_completed_cycles: 2,
-        tier: preset.tier,
-        reward_title: preset.reward_title,
+        id: `card-${user.id.substring(0, 12)}`,
+        member_id: memberCode,
+        customer_name: userName,
+        customer_email: userEmail,
+        tenant_name: 'Blue Bottle Coffee',
+        tenant_location: 'Hayes Valley • 315 Linden St, SF',
+        current_stamps: 0,
+        total_stamps: 7,
+        total_completed_cycles: 0,
+        tier: 'Gold Brew Club',
+        reward_title: 'Free Handcrafted Coffee',
         last_stamped_at: new Date().toISOString(),
         session_token: `sess_${Math.random().toString(36).substring(2, 10)}`
       },
@@ -258,16 +228,17 @@ export async function fetchLiveCustomerCard(memberId: string): Promise<{
   } catch (err) {
     return {
       data: {
-        id: `card-${memberId}`,
-        member_id: preset.member_id,
-        customer_name: preset.customer_name,
-        tenant_name: preset.tenant_name,
-        tenant_location: preset.tenant_location,
-        current_stamps: preset.current_stamps,
-        total_stamps: preset.total_stamps,
-        total_completed_cycles: 2,
-        tier: preset.tier,
-        reward_title: preset.reward_title,
+        id: `card-${user.id.substring(0, 12)}`,
+        member_id: memberCode,
+        customer_name: userName,
+        customer_email: userEmail,
+        tenant_name: 'Blue Bottle Coffee',
+        tenant_location: 'Hayes Valley • 315 Linden St, SF',
+        current_stamps: 0,
+        total_stamps: 7,
+        total_completed_cycles: 0,
+        tier: 'Gold Brew Club',
+        reward_title: 'Free Handcrafted Coffee',
         last_stamped_at: new Date().toISOString(),
         session_token: `sess_${Math.random().toString(36).substring(2, 10)}`
       },
@@ -277,83 +248,59 @@ export async function fetchLiveCustomerCard(memberId: string): Promise<{
 }
 
 /**
- * Fetch stamps history for this card from 'stamps' or 'stamp_transactions'.
+ * Fetch stamp history ledger for the customer's card
  */
-export async function fetchLiveStamps(cardId: string): Promise<{
-  data: LiveStampItem[];
+export async function fetchCustomerStamps(cardId: string): Promise<{
+  data: StampItem[];
   error: any;
 }> {
   try {
-    // 1. Try 'stamps' table
-    const { data: stamps, error: stampsError } = await supabase
+    const { data: stamps, error } = await supabase
       .from('stamps')
       .select('*')
       .eq('card_id', cardId)
       .order('created_at', { ascending: false })
       .limit(10);
 
-    if (!stampsError && stamps && stamps.length > 0) {
+    if (!error && stamps && stamps.length > 0) {
       return {
         data: stamps.map((s, index) => ({
           id: s.id || `stamp-${index}`,
           card_id: s.card_id || cardId,
           slot_number: s.slot_number || (stamps.length - index),
           created_at: s.created_at || new Date().toISOString(),
-          item_name: s.item_name || '1x Bella Donovan Pour-over',
-          cashier_name: s.cashier_name || 'Sam T.',
+          item_name: s.item_name || 'Handcrafted Pour-over',
+          cashier_name: s.cashier_name || 'Merchant Register',
           location: s.location || 'Hayes Valley'
         })),
         error: null
       };
     }
 
-    // 2. Try 'stamp_transactions' table
-    const { data: txs, error: txError } = await supabase
-      .from('stamp_transactions')
-      .select('*')
-      .eq('card_id', cardId)
-      .order('created_at', { ascending: false })
-      .limit(10);
-
-    if (!txError && txs && txs.length > 0) {
-      return {
-        data: txs.map((tx, index) => ({
-          id: tx.id,
-          card_id: tx.card_id,
-          slot_number: txs.length - index,
-          created_at: tx.created_at,
-          item_name: tx.type === 'reward_redeemed' ? 'Reward Redeemed' : 'Handcrafted Beverage',
-          cashier_name: 'Cashier Staff',
-          location: 'Hayes Valley'
-        })),
-        error: null
-      };
-    }
-
-    return { data: [], error: stampsError || txError };
+    return { data: [], error };
   } catch (err) {
     return { data: [], error: err };
   }
 }
 
 /**
- * Generate Dynamic TOTP QR Code Payload
- * Encodes customer member_id, session token, real-time TOTP, timestamp, and signature
- * Scannable by the Merchant App register camera / barcode scanner.
+ * Generate Secure Dynamic TOTP QR Code Payload
+ * Encodes the customer's authenticated member ID, session token, rotating TOTP, and timestamp.
  */
-export function generateTotpQrPayload(
-  memberId: string, 
-  sessionToken: string, 
+export function generateCustomerTotpQr(
+  card: CustomerCardData,
   totpCode: string
 ): string {
   const payload = {
     v: 1,
-    mid: memberId,
+    cid: card.id,
+    mid: card.member_id,
+    email: card.customer_email,
     totp: totpCode,
-    tok: sessionToken,
+    tok: card.session_token || `sess_${Math.random().toString(36).substring(2, 10)}`,
     ts: Math.floor(Date.now() / 1000),
     exp: Math.floor(Date.now() / 1000) + 30,
-    tenant: 'Blue Bottle Coffee',
+    tenant: card.tenant_name,
     type: 'LOYALTY_PASS_STAMP'
   };
 
