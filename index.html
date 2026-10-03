@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <script>
+      (function() {
+        try {
+          var _origFetch = typeof window !== 'undefined' ? window.fetch : undefined;
+          var _currentFetch = _origFetch;
+          var desc = {
+            configurable: true,
+            enumerable: true,
+            get: function() {
+              return _currentFetch;
+            },
+            set: function(fn) {
+              _currentFetch = fn;
+            }
+          };
+          if (typeof window !== 'undefined') {
+            try {
+              Object.defineProperty(window, 'fetch', desc);
+            } catch (e) {}
+            if (typeof Window !== 'undefined' && Window.prototype) {
+              try {
+                Object.defineProperty(Window.prototype, 'fetch', desc);
+              } catch (e) {}
+            }
+          }
+          if (typeof globalThis !== 'undefined') {
+            try {
+              Object.defineProperty(globalThis, 'fetch', desc);
+            } catch (e) {}
+          }
+        } catch (e) {}
+      })();
+    </script>
+    <title>Supabase Multi-Tenant Loyalty Stamp SaaS SQL Engine</title>
+    <meta name="description" content="Complete production-ready PostgreSQL setup script with strict RLS policies, automated stamp cycle triggers, schema ERD visualizer, and live multi-tenant simulator." />
+    <meta property="og:title" content="Supabase Multi-Tenant Loyalty Stamp SaaS SQL Engine" />
+    <meta property="og:description" content="Complete production-ready PostgreSQL setup script with strict RLS policies, automated stamp cycle triggers, schema ERD visualizer, and live multi-tenant simulator." />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+

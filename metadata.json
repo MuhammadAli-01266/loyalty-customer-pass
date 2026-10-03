@@ -1,0 +1,6 @@
+{
+  "name": "Supabase Multi-Tenant Loyalty Stamp SaaS SQL Engine",
+  "description": "Complete production-ready PostgreSQL setup script with strict RLS policies, automated stamp cycle triggers, schema ERD visualizer, and live multi-tenant simulator.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
