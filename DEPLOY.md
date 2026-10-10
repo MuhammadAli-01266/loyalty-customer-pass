@@ -27,6 +27,11 @@ project ref), and `npm run check:backend` confirms it from your machine.
 
 ## B. Supabase backend
 
+- [ ] **B0. Projects that ever ran the AI Studio prototype** (this includes `uovotzsbepqufgcxewkt`): take a backup
+      (*Database → Backups*), then run `supabase/migrations/20260929000000_retire_prototype.sql` **first**.
+      It moves the prototype's tables (`tenants`, `customers`, `cards`, `stamps`, …) and functions into a locked
+      `legacy_prototype` schema. No data is deleted, the `USING (true)` exposure ends, and 0001 can then create
+      its own `tenants` table. The undo is in the file header. On a brand-new project it finds nothing and does nothing.
 - [ ] **B1. Apply migrations 0001–0005, in order.**
   - CLI: `supabase link --project-ref uovotzsbepqufgcxewkt`, then `supabase db push`.
   - Or SQL editor: run each file in `supabase/migrations/` in filename order.
